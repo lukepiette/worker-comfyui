@@ -1,12 +1,12 @@
 # Build argument for base image selection
-ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+ARG BASE_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
 # Stage 1: Base image with common dependencies
 FROM ${BASE_IMAGE} AS base
 
 # Build arguments for this stage with sensible defaults for standalone builds
-ARG COMFYUI_VERSION=latest
-ARG CUDA_VERSION_FOR_COMFY
+ARG COMFYUI_VERSION=0.29.0
+ARG CUDA_VERSION_FOR_COMFY=12.8
 ARG ENABLE_PYTORCH_UPGRADE=false
 ARG PYTORCH_INDEX_URL
 
@@ -48,7 +48,9 @@ RUN wget -qO- https://astral.sh/uv/install.sh | sh \
 ENV PATH="/opt/venv/bin:${PATH}"
 
 # Install comfy-cli + dependencies needed by it to install ComfyUI
-RUN uv pip install comfy-cli pip setuptools wheel
+# comfy-cli is pinned: its install/torch-index behavior decides what lands in
+# the workspace venv, so an unpinned version makes builds non-reproducible.
+RUN uv pip install comfy-cli==1.13.0 pip setuptools wheel
 
 # Install ComfyUI
 RUN if [ -n "${CUDA_VERSION_FOR_COMFY}" ]; then \
@@ -76,7 +78,17 @@ RUN if [ "$ENABLE_PYTORCH_UPGRADE" = "true" ]; then \
 # breaking API changes also crash ComfyUI at startup. Pinning them in the same
 # RUN downgrades within one layer, so the unwanted versions aren't left behind
 # bloating the image.
-RUN uv pip install -r /comfyui/requirements.txt \
+#
+# torch is installed FIRST, pinned to +cu128 builds: ComfyUI's requirements.txt
+# declares a bare `torch`, and default PyPI serves CUDA 13 builds (torch's PyPI
+# wheels depend on nvidia-*-cu13 since 2.11) that require driver >= 580. Hosts
+# allowed in .runpod/hub.json advertise CUDA 12.8/12.9 (driver 570/575), where
+# a cu13 torch fails CUDA init at startup. cu128 builds run on driver >= 570,
+# i.e. every allowed host. Installing torch first satisfies the bare `torch`
+# requirement so the PyPI pass doesn't touch it.
+RUN uv pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
+      --index-url https://download.pytorch.org/whl/cu128 \
+    && uv pip install -r /comfyui/requirements.txt \
     && for r in /comfyui/custom_nodes/*/requirements.txt; do \
          [ -f "$r" ] && uv pip install -r "$r" || true; \
        done \
